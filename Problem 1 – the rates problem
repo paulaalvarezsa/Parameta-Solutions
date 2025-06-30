@@ -1,0 +1,66 @@
+import pandas as pd
+import numpy as np
+import argparse
+from pathlib import Path
+
+class RateProcessor:
+    def __init__(self, ccy_file, price_file, spot_file, output_file):
+        self.ccy_file = Path(ccy_file)
+        self.price_file = Path(price_file)
+        self.spot_file = Path(spot_file)
+        self.output_file = Path(output_file)
+
+    def run(self):
+        # Load input files
+        df_ccy = pd.read_csv(self.ccy_file)
+        df_price = pd.read_parquet(self.price_file)
+        df_spot = pd.read_parquet(self.spot_file)
+
+        # Ensure timestamps are in datetime format
+        df_price['timestamp'] = pd.to_datetime(df_price['timestamp'])
+        df_spot['timestamp'] = pd.to_datetime(df_spot['timestamp'])
+
+        # Merge price data with conversion metadata
+        df = df_price.merge(df_ccy, on='ccy_pair', how='left')
+
+        result = []
+
+        for _, row in df.iterrows():
+            if pd.isna(row['convert']) or not row['convert']:
+                # No conversion needed
+                row['final_price'] = row['price']
+            else:
+                # Conversion required
+                one_hour_ago = row['timestamp'] - pd.Timedelta(hours=1)
+
+                eligible_rates = df_spot[
+                    (df_spot['ccy_pair'] == row['ccy_pair']) &
+                    (df_spot['timestamp'] >= one_hour_ago) &
+                    (df_spot['timestamp'] < row['timestamp'])
+                ]
+
+                if not eligible_rates.empty:
+                    latest_rate = eligible_rates.sort_values('timestamp').iloc[-1]['spot_mid_rate']
+                    row['final_price'] = (row['price'] / row['conversion_factor']) + latest_rate
+                else:
+                    # No spot rate available in lookback window
+                    row['final_price'] = np.nan
+
+            result.append(row)
+
+        # Save output
+        df_result = pd.DataFrame(result)
+        df_result.to_csv(self.output_file, index=False)
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="FX Rate Processor")
+    parser.add_argument('--ccy', required=True, help='Path to currency conversion metadata (CSV)')
+    parser.add_argument('--price', required=True, help='Path to FX price data (Parquet)')
+    parser.add_argument('--spot', required=True, help='Path to FX spot rate data (Parquet)')
+    parser.add_argument('--out', required=True, help='Output CSV file with final prices')
+    return parser.parse_args()
+
+if __name__ == '__main__':
+    args = parse_args()
+    processor = RateProcessor(args.ccy, args.price, args.spot, args.out)
+    processor.run()
