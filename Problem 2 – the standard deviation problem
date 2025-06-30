@@ -1,0 +1,67 @@
+import pandas as pd
+import numpy as np
+import argparse
+from pathlib import Path
+
+class StdevCalculator:
+    def __init__(self, input_file, output_file):
+        self.input_file = Path(input_file)
+        self.output_file = Path(output_file)
+        self.window_size = 20
+        self.start_time = pd.Timestamp('2021-11-20 00:00:00')
+        self.end_time = pd.Timestamp('2021-11-23 09:00:00')
+
+    def run(self):
+        # Load the dataset
+        df = pd.read_parquet(self.input_file)
+        df['snap_time'] = pd.to_datetime(df['snap_time'])
+
+        results = []
+
+        # Group data by security_id
+        for sec_id, group in df.groupby('security_id'):
+            group = group.sort_values('snap_time').reset_index(drop=True)
+
+            # Get all available snap times
+            all_snaps = group['snap_time'].drop_duplicates().sort_values()
+
+            # Iterate over each snap time in the target range
+            for snap_time in all_snaps:
+                if not (self.start_time <= snap_time <= self.end_time):
+                    continue
+
+                # Define the rolling window (20 contiguous hourly values before snap_time)
+                window_end = snap_time - pd.Timedelta(hours=1)
+                window_start = window_end - pd.Timedelta(hours=self.window_size - 1)
+
+                # Filter rows within the window
+                mask = (group['snap_time'] >= window_start) & (group['snap_time'] <= window_end)
+                window = group[mask].sort_values('snap_time')
+
+                # Ensure the window contains exactly 20 contiguous hourly values
+                expected_times = pd.date_range(start=window_start, end=window_end, freq='H')
+                actual_times = window['snap_time'].tolist()
+
+                if len(window) == self.window_size and actual_times == list(expected_times):
+                    results.append({
+                        'security_id': sec_id,
+                        'snap_time': snap_time,
+                        'bid_stdev': np.std(window['bid']),
+                        'mid_stdev': np.std(window['mid']),
+                        'ask_stdev': np.std(window['ask']),
+                    })
+
+        # Save results to CSV
+        df_result = pd.DataFrame(results)
+        df_result.to_csv(self.output_file, index=False)
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Rolling Stdev Calculator")
+    parser.add_argument('--input', required=True, help='Path to stdev_price_data.parq.gzip')
+    parser.add_argument('--output', required=True, help='Path to output CSV file')
+    return parser.parse_args()
+
+if __name__ == '__main__':
+    args = parse_args()
+    calc = StdevCalculator(args.input, args.output)
+    calc.run()
